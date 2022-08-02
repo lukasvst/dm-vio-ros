@@ -80,8 +80,9 @@ IF(${Boost_VERSION} GREATER_EQUAL 106500)
  set(STACKTRACE_DEFINES "-DSTACKTRACE -DBOOST_STACKTRACE_USE_ADDR2LINE")
 ENDIF()
 
-
 add_executable(${PROJECT_NAME}_node src/main.cpp src/ROSOutputWrapper.cpp)
+
+add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the
