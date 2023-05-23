@@ -57,9 +57,28 @@
 #include "ROSOutputWrapper.h"
 
 #include <live/FrameContainer.h>
+#include <rosbag/bag.h>
+#include <rosbag/view.h>
 
+#ifdef STACKTRACE
+
+#include <boost/stacktrace.hpp>
+#include <signal.h>
+
+#endif
 
 using namespace dso;
+
+#ifdef STACKTRACE
+
+void segfault_handler(int sig)
+{
+    std::cerr << "Caught signal " << sig << ", printing stacktrace:" << std::endl;
+    std::cerr << boost::stacktrace::stacktrace() << std::endl;
+    exit(1);
+}
+
+#endif
 
 dmvio::FrameContainer frameContainer;
 dmvio::IMUInterpolator imuInt(frameContainer, nullptr);
@@ -70,15 +89,47 @@ dmvio::FrameSkippingSettings frameSkippingSettings;
 std::unique_ptr<Undistort> undistorter;
 bool stopSystem = false;
 int start = 2;
+double timeshift = 0.0;
+std::string rosbagFile = "";
+bool loadRosbagThread = false;
+bool finishedLoading = false;
+
+std::string imageTopic, imuTopic;
+
+void vidCb(const sensor_msgs::ImageConstPtr img);
+void imuCb(const sensor_msgs::ImuConstPtr imu);
+void loadFromRosbag();
 
 void run(IOWrap::PangolinDSOViewer* viewer)
 {
-    bool linearizeOperation = false;
+    bool linearizeOperation = rosbagFile != ""; // linearize operation (non-rt) if we load from rosbag.
+    if(linearizeOperation && setting_minFramesBetweenKeyframes < 0)
+    {
+        setting_minFramesBetweenKeyframes = -setting_minFramesBetweenKeyframes;
+        std::cout << "Using setting_minFramesBetweenKeyframes=" << setting_minFramesBetweenKeyframes
+                  << " because of non-realtime mode." << std::endl;
+    }
+
+    std::thread rosbagLoadThread;
+    if(rosbagFile != "")
+    {
+        std::cout << "Loading images from ROSBAG instead of subscribing to the topics." << std::endl;
+        if(loadRosbagThread)
+        {
+            rosbagLoadThread = std::thread(loadFromRosbag);
+        }else
+        {
+            std::cout << "Loading all ROS messages..." << std::endl;
+            loadFromRosbag();
+            std::cout << "Finished loading." << std::endl;
+        }
+    }
+
     auto fullSystem = std::make_unique<FullSystem>(linearizeOperation, imuCalibration, imuSettings);
 
     if(setting_photometricCalibration > 0 && undistorter->photometricUndist == nullptr)
     {
-        printf("ERROR: dont't have photometric calibation. Need to use commandline options mode=1 or mode=2 ");
+        printf("ERROR: dont't have photometric calibration. Need to use commandline options mode=1 or mode=2 ");
         exit(1);
     }
 
@@ -108,14 +159,19 @@ void run(IOWrap::PangolinDSOViewer* viewer)
         // Skip the first few frames if the start variable is set.
         if(start > 0 && ii < start)
         {
-            auto pair = frameContainer.getImageAndIMUData();
+            auto pair = frameContainer.getImageAndIMUData(0);
 
             ++ii;
             continue;
         }
 
 
-        auto pair = frameContainer.getImageAndIMUData(frameSkipping.getMaxSkipFrames(frameContainer.getQueueSize()));
+        int numSkipFrames = frameSkipping.getMaxSkipFrames(frameContainer.getQueueSize());
+        if(rosbagFile != "")
+        {
+            numSkipFrames = 0; // never skip frames when loading from rosbag.
+        }
+        auto pair = frameContainer.getImageAndIMUData(numSkipFrames);
 
         if(!pair.first) continue;
 
@@ -156,11 +212,18 @@ void run(IOWrap::PangolinDSOViewer* viewer)
 
         ++ii;
 
+        // If running from ROSBAG exit automatically when finished.
+        if(rosbagFile != "" && finishedLoading && frameContainer.getQueueSize() == 0)
+        {
+            break;
+        }
+
     }
 
     fullSystem->blockUntilMappingIsFinished();
 
     fullSystem->printResult(imuSettings.resultsPrefix + "result.txt", false, false, true);
+    fullSystem->printResult(imuSettings.resultsPrefix + "resultScaled.txt", false, true, true);
 
     dmvio::TimeMeasurement::saveResults(imuSettings.resultsPrefix + "timings.txt");
 
@@ -168,6 +231,8 @@ void run(IOWrap::PangolinDSOViewer* viewer)
     {
         ow->join();
     }
+
+    if(rosbagLoadThread.joinable()) rosbagLoadThread.join();
 
     printf("DELETE FULLSYSTEM!\n");
     fullSystem.reset();
@@ -185,7 +250,7 @@ double convertStamp(const ros::Time& time)
 
 void vidCb(const sensor_msgs::ImageConstPtr img)
 {
-    double stamp = convertStamp(img->header.stamp);
+    double stamp = convertStamp(img->header.stamp) + timeshift;
 
     cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(img, sensor_msgs::image_encodings::MONO8);
     assert(cv_ptr->image.type() == CV_8U);
@@ -221,8 +286,48 @@ void imuCb(const sensor_msgs::ImuConstPtr imu)
     imuInt.addGyrData(gyrData, timestamp);
 }
 
+void loadFromRosbag()
+{
+    dmvio::TimeMeasurement meas("RosbagLoading");
+    rosbag::Bag bag;
+    bag.open(rosbagFile, rosbag::bagmode::Read);
+
+    std::vector<std::string> topics;
+    topics.push_back(imageTopic);
+    topics.push_back(imuTopic);
+    for(auto&& m : rosbag::View(bag, rosbag::TopicQuery(topics)))
+    {
+        if(m.getTopic() == imageTopic || ("/" + m.getTopic() == imageTopic))
+        {
+            sensor_msgs::Image::ConstPtr img = m.instantiate<sensor_msgs::Image>();
+            if(img != nullptr)
+            {
+                vidCb(img);
+            }
+        }else if(m.getTopic() == imuTopic || ("/" + m.getTopic() == imuTopic))
+        {
+            sensor_msgs::ImuConstPtr imuData = m.instantiate<sensor_msgs::Imu>();
+            if(imuData != nullptr)
+            {
+                imuCb(imuData);
+            }
+        }
+    }
+    bag.close();
+    finishedLoading = true;
+}
+
 int main(int argc, char** argv)
 {
+#ifdef STACKTRACE
+    // Set up the segfault handler
+    struct sigaction sa;
+    sa.sa_handler = segfault_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+#endif
+
     ros::init(argc, argv, "DMVIO_ros");
     ros::NodeHandle nh;
 
@@ -244,6 +349,12 @@ int main(int argc, char** argv)
 
     auto normalizeCamSize = std::make_shared<double>(0.0);
     settingsUtil->registerArg("normalizeCamSize", *normalizeCamSize, 0.0, 5.0);
+    // timeshift from camera to imu: timestamp_imu = timestamp_cam + timeshift
+    settingsUtil->registerArg("timeshift", timeshift);
+    // If set, data is loaded from rosbag instead of subscribing live.
+    settingsUtil->registerArg("rosbag", rosbagFile);
+    // If true, data is loaded from rosbag in separate thread. (Only active if rosbagFile is set).
+    settingsUtil->registerArg("loadRosbagThread", loadRosbagThread);
 
     // This call will parse all commandline arguments and potentially also read a settings yaml file if passed.
     mainSettings.parseArguments(argc, argv, *settingsUtil);
@@ -274,10 +385,20 @@ int main(int argc, char** argv)
         viewer = std::make_unique<IOWrap::PangolinDSOViewer>(wG[0], hG[0], true, settingsUtil, normalizeCamSize);
     }
 
-    boost::thread runThread = boost::thread(boost::bind(run, viewer.get()));
+    imageTopic = nh.resolveName("cam0/image_raw");
+    imuTopic = nh.resolveName("imu0");
+    std::cout << "Image topic: " << imageTopic << std::endl;
+    std::cout << "IMU topic: " << imuTopic << std::endl;
 
-    ros::Subscriber imageSub = nh.subscribe("cam0/image_raw", 3, &vidCb);
-    ros::Subscriber imuSub = nh.subscribe("imu0", 50, &imuCb);
+    std::thread runThread = std::thread(boost::bind(run, viewer.get()));
+
+    ros::Subscriber imageSub;
+    ros::Subscriber imuSub;
+    if(rosbagFile == "")
+    {
+        imageSub = nh.subscribe("cam0/image_raw", 3, &vidCb);
+        imuSub = nh.subscribe("imu0", 50, &imuCb);
+    }
 
     ros::spin();
     stopSystem = true;

@@ -14,6 +14,7 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   sensor_msgs
   message_generation
+  rosbag
 )
 
 find_package(Eigen3 REQUIRED)
@@ -33,6 +34,14 @@ message("\n---- Path to DM-VIO build folder is: ${DMVIO_BUILD}\n")
 set(DMVIO_ROOT ${DMVIO_BUILD}/..)
 
 find_library(DMVIO_LIBRARY dmvio ${DMVIO_BUILD}/lib/)
+
+
+IF(${Boost_VERSION} GREATER_EQUAL 106500)
+ message("Building with stacktrace support.")
+ set(STACKTRACE_LIBRARIES dl)
+ set(STACKTRACE_DEFINES "-DSTACKTRACE -DBOOST_STACKTRACE_USE_ADDR2LINE")
+ENDIF()
+
 
 add_definitions("-DENABLE_SSE")
 set(CMAKE_CXX_FLAGS
@@ -73,12 +82,6 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
-
-IF(${Boost_VERSION} GREATER_EQUAL 106500)
- message("Building with stacktrace support.")
- set(STACKTRACE_LIBRARIES dl)
- set(STACKTRACE_DEFINES "-DSTACKTRACE -DBOOST_STACKTRACE_USE_ADDR2LINE")
-ENDIF()
 
 add_executable(${PROJECT_NAME}_node src/main.cpp src/ROSOutputWrapper.cpp)
 

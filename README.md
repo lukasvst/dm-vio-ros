@@ -6,6 +6,7 @@ For more information see https://vision.in.tum.de/dm-vio and https://github.com/
 This is a ROS-Wrapper for DM-VIO, inspired by the [ROS-Wrapper for DSO](https://github.com/JakobEngel/dso_ros).
 
 It interfaces with ROS topics to input images and IMU data and to output poses.
+Alternatively, it can read images and IMU data directly from a rosbag dataset.
 
 #### Related Papers
 * **[DM-VIO: Delayed Marginalization Visual-Inertial Odometry](https://vision.in.tum.de/dm-vio)**, L. von Stumberg and D. Cremers, In IEEE Robotics and Automation Letters (RA-L), volume 7, 2022
@@ -14,7 +15,7 @@ It interfaces with ROS topics to input images and IMU data and to output poses.
 
 ### Installation
 First install DM-VIO as described [here](https://github.com/lukasvst/dm-vio) and make sure it works.
-This version of the ROS wrapper was tested with commit `b2d59aaf57c2c76ea09d84b7252fcb563281e549` of DM-VIO.
+This version of the ROS wrapper was tested with commit `d18fa15ba086043561361941b8e5298074b34b47` of DM-VIO.
 
 You need to set the environment variable `DMVIO_BUILD` to point to the folder where you built DM-VIO (which is expected to be 
 a direct subfolder of DM-VIO).
@@ -59,6 +60,19 @@ Then you can run the following commands in separate terminals
     rosrun dmvio_ros node calib=/PATH/TO/camera.txt settingsFile=/PATH/TO/dm-vio/configs/euroc.yaml mode=1 nogui=0 preset=1 useimu=1 quiet=1 init_requestFullResetNormalizedErrorThreshold=0.8 init_pgba_skipFirstKFs=1
 
     rosbag play V2_01_easy.bag
+
+
+#### New: Now you can also run in non-realtime mode on rosbags
+
+For EuRoC, simply run the following command in a terminal. (Make sure that roscore is running in a separate terminal.)
+
+    rosrun dmvio_ros node calib=/PATH/TO/camera.txt settingsFile=/PATH/TO/dm-vio/configs/euroc.yaml mode=1 nogui=0 preset=1 useimu=1 quiet=1 init_requestFullResetNormalizedErrorThreshold=0.8 init_pgba_skipFirstKFs=1 rosbag=/PATH/TO/V2_01_easy.bag loadRosbagThread=1
+
+
+This command will run as fast as possible and exit once execution is complete, which makes it useful to run on rosbag 
+datasets. If a dataset is available as a rosbag, this is more convenient than extracting the rosbag and running the non-ros 
+version of DM-VIO. However, keep in mind that ROS does not support exposure times out of the box, which can result in 
+slightly worse accuracy compared to a dataset with full photometric calibration (including exposure times).
 
 #### Example 2: Running on Realense T265
 You can run on the Realsense T265 with their provided ROS driver. Install it with
